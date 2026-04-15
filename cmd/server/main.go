@@ -47,13 +47,20 @@ func main() {
 	p := proxy.New(tp, cfg.APIKey, timeout, Version)
 	handler := proxy.NewMux(p, cfg.CORSOrigins)
 
-	// Wrap with rate limiter if enabled
+	// Wrap with rate limiter if enabled.
+	// Health check and root endpoints bypass rate limiting
+	// so Docker healthcheck and reverse proxies are never blocked.
 	var rl *ratelimit.Limiter
 	if cfg.RateLimit > 0 {
 		rl = ratelimit.New(cfg.RateLimit, time.Minute)
+		inner := handler // capture before wrapping to prevent infinite recursion
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/" || r.URL.Path == "/health" {
+				inner.ServeHTTP(w, r)
+				return
+			}
 			rl.Middleware(func(w2 http.ResponseWriter, r2 *http.Request) {
-				handler.ServeHTTP(w2, r2)
+				inner.ServeHTTP(w2, r2)
 			}).ServeHTTP(w, r)
 		})
 	}
