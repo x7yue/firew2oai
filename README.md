@@ -55,7 +55,7 @@ make build
 | `-log-level` | `LOG_LEVEL` | `info` | 日志级别 (debug/info/warn/error) |
 | `-show-thinking` | `SHOW_THINKING` | `false` | 显示 thinking 模型的思考过程 |
 | `-cors-origins` | `CORS_ORIGINS` | `*` | 允许的跨域来源（逗号分隔，`*` 表示全部） |
-| `-rate-limit` | `RATE_LIMIT` | `60` | 每 IP 每分钟最大请求数（0 禁用） |
+| `-rate-limit` | `RATE_LIMIT` | `0`（禁用） | 每 IP 每分钟最大请求数（0 禁用） |
 
 ### Docker 部署
 

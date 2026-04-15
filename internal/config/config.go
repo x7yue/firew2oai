@@ -75,7 +75,7 @@ func Load() *Config {
 	cfg.LogLevel = "info"
 	cfg.ShowThinking = false
 	cfg.CORSOrigins = "*"
-	cfg.RateLimit = 60 // 60 req/min per IP
+	cfg.RateLimit = 0 // disabled by default; set >0 to enable
 
 	// Environment variables
 	if v := os.Getenv("PORT"); v != "" {
