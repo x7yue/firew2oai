@@ -37,12 +37,15 @@ var AvailableModels = []string{
 	"cogito-671b-v2-p1",
 }
 
+// thinkingModels is the set of models that produce a thinking block
+// before the actual response, separated by the 💯 emoji.
+var thinkingModels = map[string]bool{
+	"qwen3-vl-30b-a3b-thinking": true,
+	"kimi-k2-thinking":          true,
+}
+
 // IsThinkingModel checks if the model name indicates a thinking/reasoning model.
 func IsThinkingModel(model string) bool {
-	thinkingModels := map[string]bool{
-		"qwen3-vl-30b-a3b-thinking": true,
-		"kimi-k2-thinking":          true,
-	}
 	return thinkingModels[model]
 }
 
@@ -113,7 +116,3 @@ func (c *Config) Addr() string {
 	return fmt.Sprintf(":%d", c.Port)
 }
 
-// TimeoutDuration returns the timeout as a time.Duration.
-func (c *Config) TimeoutDuration() int {
-	return c.Timeout
-}

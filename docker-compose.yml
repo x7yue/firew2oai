@@ -13,7 +13,7 @@ services:
       - TIMEOUT=${TIMEOUT:-120}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     healthcheck:
-      test: ["CMD", "/firew2oai"]  # scratch image has no curl, just check binary exists
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:39527/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

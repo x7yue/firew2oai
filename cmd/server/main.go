@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -43,7 +42,7 @@ func main() {
 	tp := transport.New(timeout)
 
 	// Create proxy handler
-	p := proxy.New(tp, cfg.APIKey, timeout)
+	p := proxy.New(tp, cfg.APIKey, timeout, Version)
 	handler := proxy.NewMux(p)
 
 	// Create HTTP server with timeouts
@@ -101,6 +100,3 @@ func parseLogLevel(s string) slog.Level {
 		return slog.LevelInfo
 	}
 }
-
-// Ensure unused flag import is silenced
-var _ = flag.String

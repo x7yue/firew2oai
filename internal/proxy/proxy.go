@@ -122,14 +122,16 @@ type Proxy struct {
 	transport *transport.FireworksTransport
 	apiKey    string
 	timeout   time.Duration
+	version   string
 }
 
 // New creates a new Proxy instance.
-func New(transport *transport.FireworksTransport, apiKey string, timeout time.Duration) *Proxy {
+func New(transport *transport.FireworksTransport, apiKey string, timeout time.Duration, version string) *Proxy {
 	return &Proxy{
 		transport: transport,
 		apiKey:    apiKey,
 		timeout:   timeout,
+		version:   version,
 	}
 }
 
@@ -167,14 +169,10 @@ func generateRequestID() string {
 // ─── Route Handlers ───────────────────────────────────────────────────────
 
 // handleRoot returns service info and available endpoints.
-func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
+func (p *Proxy) handleRoot(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message":   "firew2oai - Fireworks to OpenAI API Proxy",
-		"version":   "1.0.0",
+		"version":   p.version,
 		"endpoints": map[string]string{"models": "GET /v1/models", "chat": "POST /v1/chat/completions", "health": "GET /health"},
 	})
 }
@@ -214,6 +212,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ChatCompletionRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<20) // 4MB max
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: %v", err)
 		return
@@ -285,9 +284,10 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 	inThinking := isThinking // thinking models start in thinking phase
 
 	var mu sync.Mutex
-	flush := func() {
+	writeAndFlush := func(data []byte) {
 		mu.Lock()
 		defer mu.Unlock()
+		w.Write(data)
 		if canFlush {
 			flusher.Flush()
 		}
@@ -303,8 +303,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 			{Index: 0, Delta: StreamDelta{Role: "assistant"}, FinishReason: nil},
 		},
 	}
-	writeSSE(w, roleChunk)
-	flush()
+	writeAndFlush(sseChunk(roleChunk))
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -337,9 +336,8 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 					{Index: 0, Delta: StreamDelta{}, FinishReason: &stop},
 				},
 			}
-			writeSSE(w, chunk)
-			fmt.Fprintf(w, "data: [DONE]\n\n")
-			flush()
+			writeAndFlush(sseChunk(chunk))
+			writeAndFlush([]byte("data: [DONE]\n\n"))
 			slog.Debug("stream completed", "request_id", requestID)
 			break
 		}
@@ -363,8 +361,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 							{Index: 0, Delta: StreamDelta{Content: "\n\n--- Answer ---\n\n"}, FinishReason: nil},
 						},
 					}
-					writeSSE(w, chunk)
-					flush()
+					writeAndFlush(sseChunk(chunk))
 				}
 			}
 			continue
@@ -384,8 +381,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 				{Index: 0, Delta: StreamDelta{Content: content}, FinishReason: nil},
 			},
 		}
-		writeSSE(w, chunk)
-		flush()
+		writeAndFlush(sseChunk(chunk))
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -463,8 +459,6 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, requestI
 	}
 
 	content := result.String()
-	promptTokens := len(strings.Fields(string(body)))
-	completionTokens := len(strings.Fields(content))
 
 	resp := ChatCompletionResponse{
 		ID:      requestID,
@@ -478,11 +472,8 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, requestI
 				FinishReason: "stop",
 			},
 		},
-		Usage: Usage{
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      promptTokens + completionTokens,
-		},
+		// Fireworks does not return token usage; return zeros to avoid misleading clients.
+		Usage: Usage{},
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -493,24 +484,28 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, requestI
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	data, _ := json.Marshal(v)
+	w.Write(data)
+	w.Write([]byte("\n"))
 }
 
-func writeSSE(w http.ResponseWriter, v interface{}) {
+func sseChunk(v interface{}) []byte {
 	data, _ := json.Marshal(v)
-	fmt.Fprintf(w, "data: %s\n\n", data)
+	return []byte(fmt.Sprintf("data: %s\n\n", data))
 }
 
 func writeError(w http.ResponseWriter, status int, format string, args ...interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	data, _ := json.Marshal(map[string]interface{}{
 		"error": map[string]interface{}{
 			"message": fmt.Sprintf(format, args...),
 			"type":    "invalid_request_error",
 			"code":    status,
 		},
 	})
+	w.Write(data)
+	w.Write([]byte("\n"))
 }
 
 // ─── Middleware: Auth ─────────────────────────────────────────────────────
@@ -635,7 +630,3 @@ func NewMux(p *Proxy) http.Handler {
 	return mux
 }
 
-// Handler returns the main HTTP handler. Convenience wrapper for NewMux.
-func Handler(p *Proxy) http.Handler {
-	return NewMux(p)
-}
