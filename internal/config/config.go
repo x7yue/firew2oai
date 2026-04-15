@@ -38,7 +38,7 @@ var AvailableModels = []string{
 	"glm-4p7",
 	"deepseek-v3p2",
 	"deepseek-v3p1",
-	"cogito-671b-v2-p1",
+	"cogito-671b-v2-p1", // 2026-04-15: 上游返回 404，疑似已下线
 }
 
 // thinkingModels is the set of models that produce a thinking block

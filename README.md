@@ -140,24 +140,26 @@ curl -X POST http://localhost:39527/v1/chat/completions \
 
 ## 支持模型
 
-| 模型 | 类型 |
-|---|---|
-| qwen3-vl-30b-a3b-thinking | Thinking (视觉) |
-| qwen3-vl-30b-a3b-instruct | 视觉 |
-| qwen3-8b | 通用 |
-| minimax-m2p5 | 通用 |
-| minimax-m2p1 | 通用 |
-| llama-v3p3-70b-instruct | 通用 |
-| kimi-k2p5 | 通用 |
-| kimi-k2-thinking | Thinking |
-| kimi-k2-instruct-0905 | 通用 |
-| gpt-oss-20b | 通用 |
-| gpt-oss-120b | 通用 |
-| glm-5 | 通用 |
-| glm-4p7 | 通用 |
-| deepseek-v3p2 | 通用 |
-| deepseek-v3p1 | 通用 |
-| cogito-671b-v2-p1 | 通用 |
+> **可用性检测时间**: 2026-04-15 22:05 CST — 逐模型对接 Fireworks 上游 API 实测，15/16 通过，1 个已下线。
+
+| 模型 | 类型 | 状态 |
+|---|---|---|
+| qwen3-vl-30b-a3b-thinking | Thinking (视觉) | ✅ |
+| qwen3-vl-30b-a3b-instruct | 视觉 | ✅ |
+| qwen3-8b | 通用 | ✅ |
+| minimax-m2p5 | 通用 | ✅ |
+| minimax-m2p1 | 通用 | ✅ |
+| llama-v3p3-70b-instruct | 通用 | ✅ |
+| kimi-k2p5 | 通用 | ✅ |
+| kimi-k2-thinking | Thinking | ✅ |
+| kimi-k2-instruct-0905 | 通用 | ✅ |
+| gpt-oss-20b | 通用 | ✅ |
+| gpt-oss-120b | 通用 | ✅ |
+| glm-5 | 通用 | ✅ |
+| glm-4p7 | 通用 | ✅ |
+| deepseek-v3p2 | 通用 | ✅ |
+| deepseek-v3p1 | 通用 | ✅ |
+| ~~cogito-671b-v2-p1~~ | ~~通用~~ | ❌ 2026-04-15 上游返回 404，已下线 |
 
 ## 指纹伪装策略
 
