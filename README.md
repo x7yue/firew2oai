@@ -8,7 +8,8 @@ Fireworks.ai Chat API → OpenAI Chat Completions 文本子集转换代理
 ## 特性
 
 - **标准 OpenAI 兼容** — `/v1/chat/completions`、`/v1/responses` 和 `/v1/models` 接口，即插即用
-- **流式 + 非流式** — 完整支持 Chat Completions / Responses 的 SSE streaming 和非流式响应
+- **流式 + 非流式** — 支持 Chat Completions / Responses 文本子集的 SSE streaming 和非流式响应
+- **Codex 基础接入** — 已验证 Codex 直连和经 New API 中转的最小文本任务可用
 - **Thinking 模型** — 自动处理思考过程，可配置显示/隐藏（`show_thinking`）
 - **Chrome TLS 指纹** — 模拟 Chrome 的 JA3 指纹，包括 TLS 1.3 密码套件顺序、曲线偏好
 - **完整 HTTP 伪装** — `sec-ch-ua` Client Hints、`sec-fetch-*`、`Accept-Language`、`Origin`/`Referer` 等全量 Chrome 浏览器请求头
@@ -150,6 +151,19 @@ Base URL: http://localhost:39527
 API Key: sk-admin
 ```
 
+Codex `config.toml` 示例：
+
+```toml
+model = "deepseek-v3p2"
+model_provider = "firew2oai"
+
+[model_providers.firew2oai]
+name = "firew2oai"
+base_url = "http://127.0.0.1:39527/v1"
+experimental_bearer_token = "sk-admin"
+wire_api = "responses"
+```
+
 ### 方式二：New API / One API 中转
 
 通过 API 聚合网关中转，适合多用户、多模型管理场景。
@@ -165,6 +179,22 @@ API Key: sk-admin
 - 如果 New API 和 firew2oai 都在 Docker 中，使用 `host.docker.internal:39527` 或容器网络
 - 确保 firew2oai 的 `-ip-whitelist` 允许网关 IP 访问
 
+Codex 经 New API 中转时，Codex 的 `base_url` 应指向 New API 的 `/v1` 地址，`wire_api` 仍使用 `responses`。New API 渠道侧保持 OpenAI 兼容渠道，渠道地址指向 firew2oai。
+
+### Codex 端到端复测状态
+
+复测日期：2026-04-17。完整记录见 `docs/reviews/CR-CODEX-E2E-2026-04-17.md`。
+
+| 场景 | 直连 firew2oai | New API 中转 | 说明 |
+|---|---|---|---|
+| 最小文本任务 | 通过 | 通过 | `只回答 ok` 返回 `ok` |
+| Responses 流闭合 | 通过 | 通过 | 已发送 `response.created` / `response.completed` 包装事件 |
+| 多轮会话 | 未达可用 | 未达可用 | 恢复会话后模型容易转入错误工具调用 |
+| 工具调用 | 未达可用 | 未达可用 | 已桥接合法 JSON 工具调用，但上游文本模型会生成错误工具名或参数 |
+| `spawn_agent` | 未达可用 | 未达可用 | 仍依赖稳定工具调用，当前无法保证完成具体任务 |
+
+当前建议将 Codex 接入定位为“文本任务与协议验证可用”。涉及读取文件、执行命令、多轮 Agent 或 `subagent` 的任务，应以真实 JSONL 事件和 firew2oai 日志为准，不应仅凭 HTTP 200 判定成功。
+
 ## API 端点
 
 | 端点 | 方法 | 说明 |
@@ -174,6 +204,7 @@ API Key: sk-admin
 | `/metrics` | GET | Prometheus 指标（请求量/状态码/时延/并发等） |
 | `/v1/models` | GET | 获取模型列表（需认证） |
 | `/v1/chat/completions` | POST | 聊天补全（需认证） |
+| `/v1/responses` | POST | Responses 文本子集（需认证） |
 
 ## 使用示例
 
