@@ -66,10 +66,10 @@
 ### 问题发现
 - **kimi 模型 502 错误**: Fireworks 上游对部分 kimi 模型返回 404
 - **原因**: Fireworks 平台已下架 kimi-k2-thinking、kimi-k2-instruct-0905
-- **状态**: kimi-k2p5 间歇性恢复可用，minimax-m2p1 新发现不可用
+- **状态**: 2026-04-17 复验时 kimi-k2p5 连续 3 次成功；minimax-m2p1 仍不可用
 - **更新**: README 已更新可用模型列表
 
-### 当前可用模型（11个）
+### 当前可用模型（12个）
 ✅ qwen3-vl-30b-a3b-thinking, qwen3-vl-30b-a3b-instruct, qwen3-8b  
 ✅ minimax-m2p5, llama-v3p3-70b-instruct, kimi-k2p5（间歇性）  
 ✅ gpt-oss-20b, gpt-oss-120b, glm-5, glm-4p7  
@@ -81,7 +81,8 @@
 ### 架构优化（CSE 弹性设计）
 - **Authorization 转发**: transport 层现在正确转发客户端 Authorization header 到上游
 - **弹性 SSE 处理**: 上游返回内容但没有 `done` 事件时，仍返回 200 而非 502
-- **错误事件处理**: 正确识别并处理 Fireworks 返回的 `type=error` SSE 事件
+- **错误事件处理**: 正确保留并返回 Fireworks `type=error` 中的 404 明细
+- **Responses 多轮会话**: 支持 `previous_response_id` 以内存会话态串联多轮上下文
 
 ### 兼容性验证
 - ✅ 直连模式（Codex / OpenAI 客户端）

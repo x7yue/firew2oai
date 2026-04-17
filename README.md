@@ -232,7 +232,7 @@ curl -X POST http://localhost:39527/v1/responses \
 |---|---|---|---|
 | qwen3-vl-30b-a3b-thinking | Thinking (视觉) | ✅ | |
 | qwen3-vl-30b-a3b-instruct | 视觉 | ✅ | |
-| qwen3-8b | 通用 | ✅ | |
+| qwen3-8b | Thinking/通用 | ✅ | 当前上游会输出 `<think>` 块，代理已按 thinking 模型处理 |
 | minimax-m2p5 | 通用 | ✅ | |
 | llama-v3p3-70b-instruct | 通用 | ✅ | |
 | kimi-k2p5 | 通用 | ✅ | 间歇性可用 |
@@ -247,7 +247,7 @@ curl -X POST http://localhost:39527/v1/responses \
 | ~~kimi-k2-instruct-0905~~ | 通用 | ❌ | Fireworks 平台已下架（404） |
 | ~~cogito-671b-v2-p1~~ | 通用 | ❌ | Fireworks 平台已下架（404） |
 
-**注意**：Fireworks 平台模型可用性可能随时变化。如果遇到 502 错误，请检查上游是否返回 404。
+**注意**：Fireworks 平台模型可用性可能随时变化。如果遇到 502 错误，请检查上游是否返回 `type=error` / 404。
 
 ## 指纹伪装策略
 
