@@ -9,7 +9,7 @@ Fireworks.ai Chat API → OpenAI Chat Completions 文本子集转换代理
 
 - **标准 OpenAI 兼容** — `/v1/chat/completions`、`/v1/responses` 和 `/v1/models` 接口，即插即用
 - **流式 + 非流式** — 支持 Chat Completions / Responses 文本子集的 SSE streaming 和非流式响应
-- **Codex 基础接入** — 已验证 Codex 直连和经 New API 中转的最小文本任务可用
+- **Codex 深度适配** — 保留 Responses 原始 item 历史，支持 `previous_response_id`、工具回灌、`usage` 估算与工具协议校验
 - **Thinking 模型** — 自动处理思考过程，可配置显示/隐藏（`show_thinking`）
 - **Chrome TLS 指纹** — 模拟 Chrome 的 JA3 指纹，包括 TLS 1.3 密码套件顺序、曲线偏好
 - **完整 HTTP 伪装** — `sec-ch-ua` Client Hints、`sec-fetch-*`、`Accept-Language`、`Origin`/`Referer` 等全量 Chrome 浏览器请求头
@@ -181,19 +181,28 @@ wire_api = "responses"
 
 Codex 经 New API 中转时，Codex 的 `base_url` 应指向 New API 的 `/v1` 地址，`wire_api` 仍使用 `responses`。New API 渠道侧保持 OpenAI 兼容渠道，渠道地址指向 firew2oai。
 
-### Codex 端到端复测状态
+### Codex 适配状态
 
-复测日期：2026-04-17。完整记录见 `docs/reviews/CR-CODEX-E2E-2026-04-17.md`。
+代码与测试核对日期：2026-04-17。端到端复测记录见 `docs/reviews/CR-CODEX-E2E-2026-04-17.md`。
 
 | 场景 | 直连 firew2oai | New API 中转 | 说明 |
 |---|---|---|---|
 | 最小文本任务 | 通过 | 通过 | `只回答 ok` 返回 `ok` |
 | Responses 流闭合 | 通过 | 通过 | 已发送 `response.created` / `response.completed` 包装事件 |
-| 多轮会话 | 未达可用 | 未达可用 | 恢复会话后模型容易转入错误工具调用 |
-| 工具调用 | 未达可用 | 未达可用 | 已桥接合法 JSON 工具调用，但上游文本模型会生成错误工具名或参数 |
-| `spawn_agent` | 未达可用 | 未达可用 | 仍依赖稳定工具调用，当前无法保证完成具体任务 |
+| 多轮会话恢复 | 协议级通过 | 协议级通过 | `previous_response_id` 现基于原始 Responses items 恢复，而不是仅拼接聊天文本 |
+| 工具调用回灌 | 协议级通过 | 协议级通过 | 支持保存 `function_call` / `custom_tool_call` 及下一轮 `*_output` 输入项 |
+| `usage` 展示 | 通过 | 通过 | `response.completed.response.usage` 现返回本地估算 token，便于 New API 展示与计费 |
+| 真实复杂任务 / `spawn_agent` | 部分通过 | 部分通过 | firew2oai 已做协议适配，但真实成功率仍取决于上游模型是否稳定生成合法工具调用 |
 
-当前建议将 Codex 接入定位为“文本任务与协议验证可用”。涉及读取文件、执行命令、多轮 Agent 或 `subagent` 的任务，应以真实 JSONL 事件和 firew2oai 日志为准，不应仅凭 HTTP 200 判定成功。
+当前建议将 Codex 接入定位为“协议级多轮与工具回灌已适配”。对于读取文件、执行命令、多轮 Agent、`subagent` 等真实复杂任务，仍应同时检查 Codex JSONL 事件、`response.output_item.done` 内容和 firew2oai 日志，不应仅凭 HTTP 200 判定成功。
+
+### Codex 适配要点
+
+- firew2oai 会保存每次 `/v1/responses` 的原始 request items 与历史 items，后续 `previous_response_id` 直接基于 item 图恢复上下文。
+- `/v1/responses/{id}/input_items` 返回原始输入项，而不是降级后的聊天文本，便于 Codex 恢复工具链状态。
+- 当上游模型输出合法工具调用 JSON 时，代理会转换为 `function_call` 或 `custom_tool_call` item；若工具名或参数不合法，则显式返回 `Codex adapter error`，避免静默降级。
+- `tool_choice: "none"` 会禁用工具模式；有工具时会在 prompt 中追加 `AVAILABLE_TOOLS` 与 `TOOL_CHOICE` 约束。
+- `response.completed` 内会包含本地估算的 `usage.input_tokens`、`usage.output_tokens`、`usage.total_tokens`，用于兼容 New API 展示。
 
 ## API 端点
 
