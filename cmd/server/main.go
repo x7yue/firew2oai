@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mison/firew2oai/internal/config"
+	"github.com/mison/firew2oai/internal/models"
 	"github.com/mison/firew2oai/internal/proxy"
 	"github.com/mison/firew2oai/internal/tokenauth"
 	"github.com/mison/firew2oai/internal/transport"
@@ -41,7 +42,7 @@ func main() {
 		"rate_limit", cfg.RateLimit,
 		"cors_origins", cfg.CORSOrigins,
 		"ip_whitelist", cfg.IPWhitelist,
-		"models", len(config.AvailableModels),
+		"model_refresh", cfg.ModelRefresh,
 		"gomaxprocs", runtime.GOMAXPROCS(0),
 		"num_cpu", runtime.NumCPU(),
 	)
@@ -49,6 +50,13 @@ func main() {
 	// Create transport with Chrome TLS fingerprint
 	timeout := time.Duration(cfg.Timeout) * time.Second
 	tp := transport.New(timeout)
+
+	// Create dynamic model registry
+	reg := models.NewRegistry(config.FallbackModels, nil)
+	if err := reg.Refresh(context.Background()); err != nil {
+		slog.Warn("initial model refresh failed, using fallback list", "error", err)
+	}
+	reg.StartAutoRefresh(time.Duration(cfg.ModelRefresh) * time.Second)
 
 	// Create token auth manager
 	tm, err := tokenauth.New(cfg.APIKey, cfg.RateLimit)
@@ -71,7 +79,7 @@ func main() {
 	}
 
 	// Create proxy handler
-	p := proxy.New(tp, Version, cfg.ShowThinking)
+	p := proxy.New(tp, Version, cfg.ShowThinking, reg)
 	handler := proxy.NewMux(p, cfg.CORSOrigins, tm)
 
 	// Wrap with IP whitelist (applied first, constructed once at startup)
@@ -139,6 +147,9 @@ func main() {
 
 	// Stop token auth rate limiters
 	tm.Stop()
+
+	// Stop model registry auto-refresh
+	reg.Stop()
 
 	slog.Info("server stopped")
 }

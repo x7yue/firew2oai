@@ -26,51 +26,6 @@ func unsetEnv(t *testing.T, key string) {
 	})
 }
 
-func TestIsThinkingModel(t *testing.T) {
-	tests := []struct {
-		model string
-		want  bool
-	}{
-		{"qwen3-vl-30b-a3b-thinking", true},
-		{"qwen3-8b", true},
-		{"deepseek-v3p2", false},
-		{"", false},
-		{"kimi-k2-thinking-extra", false},
-	}
-	for _, tt := range tests {
-		if got := IsThinkingModel(tt.model); got != tt.want {
-			t.Errorf("IsThinkingModel(%q) = %v, want %v", tt.model, got, tt.want)
-		}
-	}
-}
-
-func TestValidModel(t *testing.T) {
-	tests := []struct {
-		model string
-		want  bool
-	}{
-		{"deepseek-v3p2", true},
-		{"kimi-k2-thinking", false},
-		{"minimax-m2p1", false},
-		{"kimi-k2-instruct-0905", false},
-		{"nonexistent-model", false},
-		{"", false},
-	}
-	for _, tt := range tests {
-		if got := ValidModel(tt.model); got != tt.want {
-			t.Errorf("ValidModel(%q) = %v, want %v", tt.model, got, tt.want)
-		}
-	}
-}
-
-func TestValidModel_AllAvailableModels(t *testing.T) {
-	for _, m := range AvailableModels {
-		if !ValidModel(m) {
-			t.Errorf("AvailableModels contains %q but ValidModel returns false", m)
-		}
-	}
-}
-
 func TestLoad_Defaults(t *testing.T) {
 	for _, key := range []string{"PORT", "HOST", "API_KEY", "TIMEOUT", "LOG_LEVEL", "SHOW_THINKING", "CORS_ORIGINS", "RATE_LIMIT", "IP_WHITELIST", "TRUSTED_PROXY_COUNT"} {
 		unsetEnv(t, key)

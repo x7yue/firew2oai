@@ -16,22 +16,25 @@ type Config struct {
 	APIKey            string // comma-separated keys, JSON file path, or inline JSON
 	Timeout           int    // seconds
 	LogLevel          string
-	ShowThinking      bool // default: show thinking process for thinking models
+	ShowThinking      bool   // default: show thinking process for thinking models
 	CORSOrigins       string
 	RateLimit         int    // global rate limit: max requests per minute per key (0 = disabled)
 	IPWhitelist       string // comma-separated IPs/CIDRs; default "127.0.0.1,::1" (loopback only); set "" or "0.0.0.0/0,::/0" to allow all
 	TrustedProxyCount int    // number of trusted reverse proxies (0 = trust none, use RemoteAddr)
+	ModelRefresh      int    // model list refresh interval in seconds (0 = disable auto-refresh)
 }
 
 const (
-	defaultPort      = 39527
-	defaultTimeout   = 120
-	defaultRateLimit = 0
-	minPort          = 1
-	maxPort          = 65535
+	defaultPort         = 39527
+	defaultTimeout      = 120
+	defaultRateLimit    = 0
+	defaultModelRefresh = 300
+	minPort             = 1
+	maxPort             = 65535
 )
 
-var AvailableModels = []string{
+// FallbackModels is the hardcoded model list used when upstream fetch fails.
+var FallbackModels = []string{
 	"qwen3-vl-30b-a3b-thinking",
 	"qwen3-vl-30b-a3b-instruct",
 	"qwen3-8b",
@@ -44,37 +47,6 @@ var AvailableModels = []string{
 	"glm-4p7",
 	"deepseek-v3p2",
 	"deepseek-v3p1",
-	// Removed after live checks on 2026-04-17:
-	// minimax-m2p1, kimi-k2-thinking, kimi-k2-instruct-0905,
-	// cogito-671b-v2-p1 all returned upstream Fireworks 404.
-	// cogito-671b-v2-p1 removed: upstream returns 404 since 2026-04-15
-}
-
-// availableModelSet is a lookup map for O(1) model validation.
-var availableModelSet map[string]bool
-
-func init() {
-	availableModelSet = make(map[string]bool, len(AvailableModels))
-	for _, m := range AvailableModels {
-		availableModelSet[m] = true
-	}
-}
-
-// thinkingModels is the set of models that produce a thinking block
-// before the actual response, separated by the 💯 emoji.
-var thinkingModels = map[string]bool{
-	"qwen3-vl-30b-a3b-thinking": true,
-	"qwen3-8b":                  true,
-}
-
-// IsThinkingModel checks if the model name indicates a thinking/reasoning model.
-func IsThinkingModel(model string) bool {
-	return thinkingModels[model]
-}
-
-// ValidModel checks if a model is in the supported list.
-func ValidModel(model string) bool {
-	return availableModelSet[model]
 }
 
 // Load reads configuration from environment variables only.
@@ -93,6 +65,7 @@ func Load() *Config {
 	cfg.RateLimit = defaultRateLimit  // disabled by default; set >0 to enable
 	cfg.IPWhitelist = "127.0.0.1,::1" // default: loopback only
 	cfg.TrustedProxyCount = 0         // default: trust no proxy, use RemoteAddr
+	cfg.ModelRefresh = defaultModelRefresh
 
 	// Environment variables
 	if v := os.Getenv("PORT"); v != "" {
@@ -151,6 +124,13 @@ func Load() *Config {
 			slog.Warn("invalid TRUSTED_PROXY_COUNT value, using default", "value", v)
 		}
 	}
+	if v := os.Getenv("MODEL_REFRESH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.ModelRefresh = n
+		} else {
+			slog.Warn("invalid MODEL_REFRESH value, using default", "value", v)
+		}
+	}
 
 	return cfg
 }
@@ -169,6 +149,7 @@ func (c *Config) ApplyFlags(args []string) {
 	fs.IntVar(&c.RateLimit, "rate-limit", c.RateLimit, "max requests per minute per key (0 to disable)")
 	fs.StringVar(&c.IPWhitelist, "ip-whitelist", c.IPWhitelist, "allowed IPs/CIDRs (comma-separated, empty to allow all)")
 	fs.IntVar(&c.TrustedProxyCount, "trusted-proxy-count", c.TrustedProxyCount, "number of trusted reverse proxies for X-Forwarded-For (0 = trust none)")
+	fs.IntVar(&c.ModelRefresh, "model-refresh", c.ModelRefresh, "model list refresh interval in seconds (0 to disable)")
 	_ = fs.Parse(args[1:])
 	if c.Port < minPort || c.Port > maxPort {
 		slog.Warn("port out of range, using default", "value", c.Port, "min", minPort, "max", maxPort)
@@ -185,6 +166,10 @@ func (c *Config) ApplyFlags(args []string) {
 	if c.TrustedProxyCount < 0 {
 		slog.Warn("trusted-proxy-count must be non-negative, clamping to 0", "value", c.TrustedProxyCount)
 		c.TrustedProxyCount = 0
+	}
+	if c.ModelRefresh < 0 {
+		slog.Warn("model-refresh must be non-negative, clamping to 0", "value", c.ModelRefresh)
+		c.ModelRefresh = 0
 	}
 }
 
