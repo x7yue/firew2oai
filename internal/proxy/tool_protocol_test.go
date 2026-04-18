@@ -520,7 +520,7 @@ func TestHandleChatCompletions_NonStreamAIActionsBlock_MultipleToolCalls(t *test
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{
@@ -570,7 +570,7 @@ func TestHandleResponses_StreamAIActionsBlock_MultipleToolCalls(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 	body := `{"model":"deepseek-v3p2","input":"查看目录并列出文件","stream":true,"tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
@@ -627,7 +627,7 @@ func TestHandleResponses_ToolChoiceNoneDoesNotExposeToolsToUpstream(t *testing.T
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"只回答结果","stream":false,"tool_choice":"none","tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
@@ -684,7 +684,7 @@ func TestHandleResponses_NonStreamAIActionsBlock_FinalModeStripsControlBlock(t *
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"只回答结果","stream":false,"tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
@@ -723,7 +723,7 @@ func TestHandleResponses_NonStreamAIActionsBlock_RequiredToolRejectsFinalMode(t 
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"必须用工具","stream":false,"tool_choice":"required","tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
@@ -759,7 +759,7 @@ func TestHandleResponses_NonStreamAIActionsBlock_ParallelToolCallsFalseRejectsMu
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"最多一个工具","stream":false,"parallel_tool_calls":false,"tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
@@ -795,7 +795,7 @@ func TestHandleChatCompletions_NonStreamAIActionsBlock_RequiredToolRejectsFinalM
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{
@@ -828,7 +828,7 @@ func TestHandleChatCompletions_NonStreamAIActionsBlock_RequiredToolRejectsFinalM
 }
 
 func TestHandleChatCompletions_ToolChoiceRequiredWithoutToolsRejected(t *testing.T) {
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, "http://127.0.0.1:1")
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, "http://127.0.0.1:1", testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{
@@ -861,7 +861,7 @@ func TestHandleResponses_StreamAIActionsBlock_RequiredToolRejectsFinalMode(t *te
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"必须调用工具","stream":true,"tool_choice":"required","tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
@@ -896,7 +896,7 @@ func TestHandleResponses_StreamAIActionsBlock_RequiredToolRejectsFinalMode(t *te
 }
 
 func TestHandleResponses_ToolChoiceRequiredWithoutToolsRejected(t *testing.T) {
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, "http://127.0.0.1:1")
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, "http://127.0.0.1:1", testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"必须调用工具","stream":false,"tool_choice":"required"}`
@@ -924,7 +924,7 @@ func TestHandleResponses_StreamAIActionsBlock_ParallelToolCallsFalseRejectsMulti
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"最多一个工具","stream":true,"parallel_tool_calls":false,"tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
@@ -963,7 +963,7 @@ func TestHandleResponses_StreamAIActionsBlock_RequiredToolRejectsFinalModeWithou
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"必须调用工具","stream":true,"tool_choice":"required","tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
