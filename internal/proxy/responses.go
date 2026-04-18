@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/mison/firew2oai/internal/config"
+	"github.com/mison/firew2oai/internal/models"
 )
 
 // ResponsesRequest is a minimal OpenAI Responses API subset.
@@ -136,18 +136,54 @@ func generateResponseMessageID() string {
 	return strings.Replace(generateRequestID(), "chatcmpl-", "msg_", 1)
 }
 
-func buildFireworksRequestBody(model, prompt string, temperature *float64, maxTokens *int) ([]byte, error) {
+func buildFireworksRequestBody(model, prompt string, temperature *float64, maxTokens *int, funcDefs []any) ([]byte, error) {
+	if funcDefs == nil {
+		funcDefs = []any{}
+	}
 	fwReq := FireworksRequest{
 		Messages: []FireworksMessage{
 			{Role: "user", Content: prompt},
 		},
 		ModelKey:            model,
 		ConversationID:      fmt.Sprintf("session_%d_%d", time.Now().UnixMilli(), time.Now().UnixNano()%10000),
-		FunctionDefinitions: []interface{}{},
+		FunctionDefinitions: funcDefs,
 		Temperature:         temperature,
 		MaxTokens:           maxTokens,
 	}
 	return json.Marshal(fwReq)
+}
+
+func convertResponsesToolsToFunctionDefs(raw json.RawMessage) []any {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("[]")) {
+		return nil
+	}
+
+	var tools []map[string]any
+	if err := json.Unmarshal(trimmed, &tools); err != nil {
+		return nil
+	}
+
+	defs := make([]any, 0, len(tools))
+	for _, tool := range tools {
+		toolType, _ := tool["type"].(string)
+		if toolType != "function" {
+			continue
+		}
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		def := map[string]any{"name": name}
+		if desc, ok := tool["description"]; ok {
+			def["description"] = desc
+		}
+		if params, ok := tool["parameters"]; ok {
+			def["parameters"] = params
+		}
+		defs = append(defs, def)
+	}
+	return defs
 }
 
 func resolveShowThinking(defaultShowThinking bool, override *bool) bool {
@@ -1049,6 +1085,28 @@ func buildToolProtocolErrorMessage(err error, upstreamText string) string {
 	return builder.String()
 }
 
+func buildNativeToolCallOutputItems(messageID, text string, toolCalls []SSEToolCall) []json.RawMessage {
+	outputItems := make([]json.RawMessage, 0, len(toolCalls)+1)
+	if strings.TrimSpace(text) != "" {
+		outputItems = append(outputItems, buildResponsesMessageItem(messageID, text))
+	}
+	for _, tc := range toolCalls {
+		callID := tc.ID
+		if callID == "" {
+			callID = "call_" + strings.Replace(generateRequestID(), "chatcmpl-", "", 1)
+		}
+		outputItems = append(outputItems, mustMarshalRawJSON(map[string]any{
+			"type":      "function_call",
+			"name":      tc.Name,
+			"arguments": string(tc.Arguments),
+			"call_id":   callID,
+			"id":        "fc_" + strings.Replace(generateRequestID(), "chatcmpl-", "", 1),
+			"status":    "completed",
+		}))
+	}
+	return outputItems
+}
+
 func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "method not allowed, use POST")
@@ -1063,7 +1121,7 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !config.ValidModel(req.Model) {
+	if !p.registry.Valid(req.Model) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "model_not_found", "model %q is not supported. Use /v1/models to list available models", req.Model)
 		return
 	}
@@ -1102,7 +1160,13 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	promptTools := toolsForPrompt(req.Tools, toolChoice)
-	prompt := buildResponsesPrompt(baseMessages, req.Instructions, currentMessages, promptTools, maxToolCalls)
+	funcDefs := convertResponsesToolsToFunctionDefs(req.Tools)
+	nativeTools := len(funcDefs) > 0
+	var responsesPromptTools json.RawMessage
+	if !nativeTools {
+		responsesPromptTools = promptTools
+	}
+	prompt := buildResponsesPrompt(baseMessages, req.Instructions, currentMessages, responsesPromptTools, maxToolCalls)
 	toolConstraints := toolProtocolConstraints{
 		RequiredTool: toolChoice.RequiredTool,
 		RequireTool:  toolChoice.RequireTool,
@@ -1115,7 +1179,7 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	bufferForToolCalls := len(toolCatalog) > 0 && !toolChoice.DisableTools
 	promptInputItems := buildHistoryItems(baseHistoryItems, requestItems, nil)
 
-	bodyBytes, err := buildFireworksRequestBody(req.Model, prompt, req.Temperature, req.MaxOutputTokens)
+	bodyBytes, err := buildFireworksRequestBody(req.Model, prompt, req.Temperature, req.MaxOutputTokens, funcDefs)
 	if err != nil {
 		slog.Error("failed to marshal fireworks request for responses", "error", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "marshal_failed", "failed to build upstream request")
@@ -1223,15 +1287,60 @@ func (p *Proxy) handleResponsesStream(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 
-	isThinking := config.IsThinkingModel(model)
+	isThinking := models.IsThinkingModel(model)
 	var result strings.Builder
 	doneReceived := false
+	var nativeToolCalls []SSEToolCall
+	nativeFinishReason := ""
 	contentEmitted, scanErr := scanSSEEvents(reader, isThinking, showThinking, func(evt sseContentEvent) bool {
 		switch evt.Type {
+		case "tool_calls":
+			nativeToolCalls = append(nativeToolCalls, evt.ToolCalls...)
+		case "finish_reason":
+			nativeFinishReason = evt.FinishReason
 		case "done":
 			doneReceived = true
 			finalText := result.String()
 			if bufferForToolCalls {
+				if len(nativeToolCalls) > 0 || nativeFinishReason == "tool_calls" {
+					outputItems := buildNativeToolCallOutputItems(messageID, finalText, nativeToolCalls)
+					completed := newCompletedResponse(responseID, messageID, model, createdAt, outputItems, promptInputItems)
+					nextOutputIndex := 0
+					if strings.TrimSpace(finalText) != "" {
+						if !writeResponsesMessageAdded(writeAndFlushEvent, responseID, messageID) {
+							return false
+						}
+						if !writeResponsesMessageDone(writeAndFlushEvent, responseID, messageID, finalText) {
+							return false
+						}
+						nextOutputIndex = 1
+					}
+					for index, item := range outputItems[nextOutputIndex:] {
+						if !writeAndFlushEvent("response.output_item.added", ResponseOutputItemAddedEvent{
+							Type:        "response.output_item.added",
+							ResponseID:  responseID,
+							OutputIndex: nextOutputIndex + index,
+							Item:        item,
+						}) {
+							return false
+						}
+					}
+					for index, item := range outputItems[nextOutputIndex:] {
+						if !writeAndFlushEvent("response.output_item.done", ResponseOutputItemDoneEvent{
+							Type:        "response.output_item.done",
+							ResponseID:  responseID,
+							OutputIndex: nextOutputIndex + index,
+							Item:        item,
+						}) {
+							return false
+						}
+					}
+					if !writeAndFlushEvent("response.completed", newResponseLifecycleEvent("response.completed", completed)) {
+						return false
+					}
+					p.responses.put(completed, requestItems, buildHistoryItems(baseHistoryItems, requestItems, outputItems))
+					return true
+				}
 				parseResult := parseToolCallOutputsWithConstraints(finalText, toolCatalog, toolConstraints)
 				slog.Info("tool protocol outcome",
 					"api", "responses",
@@ -1329,6 +1438,33 @@ func (p *Proxy) handleResponsesStream(w http.ResponseWriter, r *http.Request, re
 		slog.Debug("responses stream ended without done event but content available", "response_id", responseID, "result_len", result.Len())
 		finalText := result.String()
 		if bufferForToolCalls {
+			if len(nativeToolCalls) > 0 || nativeFinishReason == "tool_calls" {
+				outputItems := buildNativeToolCallOutputItems(messageID, finalText, nativeToolCalls)
+				completed := newCompletedResponse(responseID, messageID, model, createdAt, outputItems, promptInputItems)
+				nextOutputIndex := 0
+				if strings.TrimSpace(finalText) != "" {
+					writeResponsesMessageAdded(writeAndFlushEvent, responseID, messageID)
+					writeResponsesMessageDone(writeAndFlushEvent, responseID, messageID, finalText)
+					nextOutputIndex = 1
+				}
+				for index, item := range outputItems[nextOutputIndex:] {
+					writeAndFlushEvent("response.output_item.added", ResponseOutputItemAddedEvent{
+						Type:        "response.output_item.added",
+						ResponseID:  responseID,
+						OutputIndex: nextOutputIndex + index,
+						Item:        item,
+					})
+					writeAndFlushEvent("response.output_item.done", ResponseOutputItemDoneEvent{
+						Type:        "response.output_item.done",
+						ResponseID:  responseID,
+						OutputIndex: nextOutputIndex + index,
+						Item:        item,
+					})
+				}
+				writeAndFlushEvent("response.completed", newResponseLifecycleEvent("response.completed", completed))
+				p.responses.put(completed, requestItems, buildHistoryItems(baseHistoryItems, requestItems, outputItems))
+				return
+			}
 			parseResult := parseToolCallOutputsWithConstraints(finalText, toolCatalog, toolConstraints)
 			slog.Info("tool protocol outcome",
 				"api", "responses",
@@ -1405,11 +1541,17 @@ func (p *Proxy) handleResponsesNonStream(w http.ResponseWriter, r *http.Request,
 	defer reader.Close()
 
 	var result strings.Builder
-	isThinking := config.IsThinkingModel(model)
+	isThinking := models.IsThinkingModel(model)
 	doneReceived := false
+	var nativeToolCalls []SSEToolCall
+	nativeFinishReason := ""
 
 	contentEmitted, scanErr := scanSSEEvents(reader, isThinking, showThinking, func(evt sseContentEvent) bool {
 		switch evt.Type {
+		case "tool_calls":
+			nativeToolCalls = append(nativeToolCalls, evt.ToolCalls...)
+		case "finish_reason":
+			nativeFinishReason = evt.FinishReason
 		case "done":
 			doneReceived = true
 		case "thinking_separator":
@@ -1445,6 +1587,13 @@ func (p *Proxy) handleResponsesNonStream(w http.ResponseWriter, r *http.Request,
 	finalText := result.String()
 	createdAt := time.Now().Unix()
 	if bufferForToolCalls {
+		if len(nativeToolCalls) > 0 || nativeFinishReason == "tool_calls" {
+			outputItems := buildNativeToolCallOutputItems(messageID, finalText, nativeToolCalls)
+			completed := newCompletedResponse(responseID, messageID, model, createdAt, outputItems, promptInputItems)
+			p.responses.put(completed, requestItems, buildHistoryItems(baseHistoryItems, requestItems, outputItems))
+			writeJSON(w, http.StatusOK, completed)
+			return
+		}
 		parseResult := parseToolCallOutputsWithConstraints(finalText, toolCatalog, toolConstraints)
 		slog.Info("tool protocol outcome",
 			"api", "responses",

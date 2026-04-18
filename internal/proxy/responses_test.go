@@ -101,6 +101,30 @@ func TestResponseInputToMessages_ToolOutput(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesToolsToFunctionDefs(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}},
+		{"type":"custom","name":"notes"},
+		{"type":"function","description":"missing name"}
+	]`)
+
+	defs := convertResponsesToolsToFunctionDefs(raw)
+	if len(defs) != 1 {
+		t.Fatalf("len(defs) = %d, want 1", len(defs))
+	}
+
+	encoded, err := json.Marshal(defs[0])
+	if err != nil {
+		t.Fatalf("json.Marshal error: %v", err)
+	}
+	got := string(encoded)
+	for _, want := range []string{`"name":"exec_command"`, `"description":"run shell"`, `"parameters":{"properties":{"cmd":{"type":"string"}},"type":"object"}`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("function definition missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestParseToolCallOutput_Function(t *testing.T) {
 	result := parseToolCallOutput(
 		"```json\n{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"pwd\"}}\n```",
@@ -193,7 +217,7 @@ func TestHandleResponses_PreviousResponseID(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	firstBody := `{"model":"deepseek-v3p2","instructions":"do not carry this","input":"请记住暗号是 blue-raven。只回复 ok。"}`
@@ -247,7 +271,7 @@ func TestHandleResponseByIDAndInputItems(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","input":"say ok"}`
@@ -342,7 +366,7 @@ func TestHandleResponses_NonStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 	body := `{"model":"deepseek-v3p2","input":"say ok","stream":false,"max_output_tokens":64}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
@@ -386,6 +410,64 @@ func TestHandleResponses_NonStream(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_NonStreamNativeToolCalls(t *testing.T) {
+	var captured FireworksRequest
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"content\",\"content\":\"Working on it\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"tool_calls\",\"tool_calls\":[{\"id\":\"call_native\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"pwd\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"finish_reason\",\"finish_reason\":\"tool_calls\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"done\",\"content\":\"\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
+	mux := newTestMux(t, p, "*")
+	body := `{"model":"deepseek-v3p2","input":"inspect cwd","tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(captured.FunctionDefinitions) != 1 {
+		t.Fatalf("FunctionDefinitions len = %d, want 1", len(captured.FunctionDefinitions))
+	}
+
+	var resp ResponsesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Output) != 2 {
+		t.Fatalf("len(output) = %d, want 2: %s", len(resp.Output), rec.Body.String())
+	}
+
+	var messageItem ResponseOutputMessage
+	if err := json.Unmarshal(resp.Output[0], &messageItem); err != nil {
+		t.Fatalf("decode message item: %v", err)
+	}
+	if len(messageItem.Content) != 1 || messageItem.Content[0].Text != "Working on it" {
+		t.Fatalf("message content = %+v, want Working on it", messageItem.Content)
+	}
+
+	var functionItem map[string]any
+	if err := json.Unmarshal(resp.Output[1], &functionItem); err != nil {
+		t.Fatalf("decode function item: %v", err)
+	}
+	if functionItem["type"] != "function_call" || functionItem["name"] != "exec_command" || functionItem["call_id"] != "call_native" {
+		t.Fatalf("function item = %+v", functionItem)
+	}
+	if functionItem["arguments"] != `{"cmd":"pwd"}` {
+		t.Fatalf("arguments = %#v, want cmd payload", functionItem["arguments"])
+	}
+}
+
 func TestHandleResponses_Stream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
@@ -404,7 +486,7 @@ func TestHandleResponses_Stream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 	body := `{"model":"deepseek-v3p2","input":"hello","stream":true}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
@@ -454,7 +536,7 @@ func TestHandleResponses_StreamFunctionToolCall(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 	body := `{"model":"deepseek-v3p2","input":"read file","stream":true,"tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
@@ -483,6 +565,55 @@ func TestHandleResponses_StreamFunctionToolCall(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_StreamNativeToolCalls(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream server doesn't support flushing")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"type\":\"tool_calls\",\"tool_calls\":[{\"id\":\"call_native\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"pwd\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"type\":\"finish_reason\",\"finish_reason\":\"tool_calls\"}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"type\":\"done\",\"content\":\"\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
+	mux := newTestMux(t, p, "*")
+	body := `{"model":"deepseek-v3p2","input":"read file","stream":true,"tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	bodyText := rec.Body.String()
+	for _, want := range []string{
+		"event: response.created",
+		"event: response.output_item.added",
+		"event: response.output_item.done",
+		`"type":"function_call"`,
+		`"name":"exec_command"`,
+		`"call_id":"call_native"`,
+		"event: response.completed",
+	} {
+		if !strings.Contains(bodyText, want) {
+			t.Fatalf("stream body missing %q:\n%s", want, bodyText)
+		}
+	}
+	if strings.Contains(bodyText, "response.output_text.delta") {
+		t.Fatalf("native tool-call stream should not emit text deltas:\n%s", bodyText)
+	}
+}
+
 func TestHandleResponses_PreviousResponseIDWithToolOutput(t *testing.T) {
 	requests := make([]FireworksRequest, 0, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -502,7 +633,7 @@ func TestHandleResponses_PreviousResponseIDWithToolOutput(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL)
+	p := NewWithUpstream(transport.New(30*time.Second), "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	firstBody := `{"model":"deepseek-v3p2","input":"读取当前目录","tools":[{"type":"function","name":"exec_command","description":"run shell","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`
