@@ -12,12 +12,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mison/firew2oai/internal/config"
+	"github.com/mison/firew2oai/internal/models"
 	"github.com/mison/firew2oai/internal/tokenauth"
 	"github.com/mison/firew2oai/internal/transport"
 )
 
+func testRegistry() *models.Registry {
+	return models.NewRegistry(config.FallbackModels, nil)
+}
+
 func newTestProxy() *Proxy {
-	return New(transport.New(30*time.Second), "test", false)
+	return New(transport.New(30*time.Second), "test", false, testRegistry())
 }
 
 // newTestMux creates a mux with tokenauth for tests.
@@ -633,6 +639,38 @@ data: {"type":"done","content":""}
 	}
 }
 
+func TestScanSSEEvents_ToolCallsEvent(t *testing.T) {
+	input := "data: {\"type\":\"content\",\"content\":\"Let me help.\"}\ndata: {\"type\":\"tool_calls\",\"tool_calls\":[{\"id\":\"call_123\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"ls\"}}]}\ndata: {\"type\":\"finish_reason\",\"finish_reason\":\"tool_calls\"}\ndata: {\"type\":\"done\",\"session_id\":\"sess_1\"}\n"
+	reader := strings.NewReader(input)
+	var events []sseContentEvent
+	scanSSEEvents(reader, false, false, func(evt sseContentEvent) bool {
+		events = append(events, evt)
+		return true
+	})
+
+	if len(events) != 4 {
+		t.Fatalf("expected 4 events, got %d", len(events))
+	}
+	if events[0].Type != "content" || events[0].Content != "Let me help." {
+		t.Errorf("event 0: got type=%q content=%q", events[0].Type, events[0].Content)
+	}
+	if events[1].Type != "tool_calls" || len(events[1].ToolCalls) != 1 {
+		t.Fatalf("event 1: got type=%q toolcalls=%d", events[1].Type, len(events[1].ToolCalls))
+	}
+	if events[1].ToolCalls[0].Name != "exec_command" {
+		t.Errorf("tool call name: got %q, want exec_command", events[1].ToolCalls[0].Name)
+	}
+	if events[1].ToolCalls[0].ID != "call_123" {
+		t.Errorf("tool call id: got %q, want call_123", events[1].ToolCalls[0].ID)
+	}
+	if events[2].Type != "finish_reason" || events[2].FinishReason != "tool_calls" {
+		t.Errorf("event 2: got type=%q finish_reason=%q", events[2].Type, events[2].FinishReason)
+	}
+	if events[3].Type != "done" {
+		t.Errorf("event 3: got type=%q, want done", events[3].Type)
+	}
+}
+
 func TestScanSSEEvents_UpstreamErrorField(t *testing.T) {
 	sse := `data: {"type":"error","error":"404, message='Not Found'"}
 `
@@ -787,8 +825,8 @@ func TestCORSMiddleware_VaryOriginOnReject(t *testing.T) {
 
 func TestDefaultShowThinking(t *testing.T) {
 	// When ShowThinking is nil, the proxy should use the default value
-	pFalse := New(transport.New(30*time.Second), "test", false)
-	pTrue := New(transport.New(30*time.Second), "test", true)
+	pFalse := New(transport.New(30*time.Second), "test", false, testRegistry())
+	pTrue := New(transport.New(30*time.Second), "test", true, testRegistry())
 
 	if pFalse.defaultShowThinking != false {
 		t.Error("expected defaultShowThinking=false")
@@ -815,7 +853,7 @@ func TestShowThinking_RequestOverridesDefault(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := New(transport.New(30*time.Second), "test", tt.defaultVal)
+			p := New(transport.New(30*time.Second), "test", tt.defaultVal, testRegistry())
 			req := ChatCompletionRequest{
 				Model:        "deepseek-v3p2",
 				Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
@@ -952,7 +990,7 @@ func TestHandleNonStream_UpstreamIncomplete(t *testing.T) {
 	defer upstream.Close()
 
 	tp := transport.New(30 * time.Second)
-	p := NewWithUpstream(tp, "test", false, upstream.URL)
+	p := NewWithUpstream(tp, "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","messages":[{"role":"user","content":"hi"}],"stream":false}`
@@ -1001,7 +1039,7 @@ func TestHandleNonStream_ContextCanceled(t *testing.T) {
 	}()
 
 	tp := transport.New(30 * time.Second)
-	p := NewWithUpstream(tp, "test", false, upstream.URL)
+	p := NewWithUpstream(tp, "test", false, upstream.URL, testRegistry())
 	mux := newTestMux(t, p, "*")
 
 	body := `{"model":"deepseek-v3p2","messages":[{"role":"user","content":"hi"}],"stream":false}`

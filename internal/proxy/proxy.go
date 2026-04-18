@@ -21,7 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mison/firew2oai/internal/config"
+	"github.com/mison/firew2oai/internal/models"
 	"github.com/mison/firew2oai/internal/tokenauth"
 	"github.com/mison/firew2oai/internal/transport"
 )
@@ -36,11 +36,19 @@ const (
 
 // ─── SSE Event Types ──────────────────────────────────────────────────────
 
+type SSEToolCall struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
 // SSEEvent represents a parsed Fireworks SSE event.
 type SSEEvent struct {
-	Type    string `json:"type"`
-	Content string `json:"content,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Type         string        `json:"type"`
+	Content      string        `json:"content,omitempty"`
+	Error        string        `json:"error,omitempty"`
+	ToolCalls    []SSEToolCall `json:"tool_calls,omitempty"`
+	FinishReason string        `json:"finish_reason,omitempty"`
 }
 
 // ─── OpenAI Request / Response Types ──────────────────────────────────────
@@ -65,11 +73,14 @@ type ChatMessage struct {
 }
 
 type ChatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Stream      bool          `json:"stream,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	MaxTokens   *int          `json:"max_tokens,omitempty"`
+	Model             string          `json:"model"`
+	Messages          []ChatMessage   `json:"messages"`
+	Stream            bool            `json:"stream,omitempty"`
+	Temperature       *float64        `json:"temperature,omitempty"`
+	MaxTokens         *int            `json:"max_tokens,omitempty"`
+	Tools             json.RawMessage `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
 	// Custom extension: show thinking process for thinking models
 	ShowThinking *bool `json:"show_thinking,omitempty"`
 }
@@ -96,8 +107,9 @@ type ChatCompletionResponse struct {
 }
 
 type StreamDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string         `json:"role,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	ToolCalls []ChatToolCall `json:"tool_calls,omitempty"`
 }
 
 type StreamChoice struct {
@@ -152,12 +164,13 @@ type Proxy struct {
 	upstreamURL         string
 	metrics             *metricsCollector
 	responses           *responseStore
+	registry            *models.Registry
 }
 
 // New creates a new Proxy instance.
 // defaultShowThinking controls whether thinking models show their thinking process
 // when the request does not explicitly set show_thinking.
-func New(transport *transport.FireworksTransport, version string, defaultShowThinking bool) *Proxy {
+func New(transport *transport.FireworksTransport, version string, defaultShowThinking bool, registry *models.Registry) *Proxy {
 	return &Proxy{
 		transport:           transport,
 		version:             version,
@@ -165,11 +178,12 @@ func New(transport *transport.FireworksTransport, version string, defaultShowThi
 		upstreamURL:         upstreamURL,
 		metrics:             newMetricsCollector(time.Now),
 		responses:           newResponseStore(defaultResponseStoreEntries),
+		registry:            registry,
 	}
 }
 
 // NewWithUpstream creates a Proxy with a custom upstream URL (for testing).
-func NewWithUpstream(transport *transport.FireworksTransport, version string, defaultShowThinking bool, upstreamURL string) *Proxy {
+func NewWithUpstream(transport *transport.FireworksTransport, version string, defaultShowThinking bool, upstreamURL string, registry *models.Registry) *Proxy {
 	return &Proxy{
 		transport:           transport,
 		version:             version,
@@ -177,6 +191,7 @@ func NewWithUpstream(transport *transport.FireworksTransport, version string, de
 		upstreamURL:         upstreamURL,
 		metrics:             newMetricsCollector(time.Now),
 		responses:           newResponseStore(defaultResponseStoreEntries),
+		registry:            registry,
 	}
 }
 
@@ -241,11 +256,12 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	models := make([]ModelObject, len(config.AvailableModels))
+	modelList := p.registry.List()
+	modelObjs := make([]ModelObject, len(modelList))
 	now := time.Now().Unix()
-	for i, m := range config.AvailableModels {
-		models[i] = ModelObject{
-			ID:      m,
+	for i, m := range modelList {
+		modelObjs[i] = ModelObject{
+			ID:      m.ID,
 			Object:  "model",
 			Created: now,
 			OwnedBy: "fireworks-ai",
@@ -254,7 +270,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, ModelListResponse{
 		Object: "list",
-		Data:   models,
+		Data:   modelObjs,
 	})
 }
 
@@ -279,7 +295,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !config.ValidModel(req.Model) {
+	if !p.registry.Valid(req.Model) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "model_not_found", "model %q is not supported. Use /v1/models to list available models", req.Model)
 		return
 	}
@@ -289,7 +305,39 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.ShowThinking != nil {
 		showThinking = *req.ShowThinking
 	}
-	prompt := messagesToPrompt(req.Messages)
+	normalizedTools := normalizeChatTools(req.Tools)
+	normalizedToolChoice := normalizeChatToolChoice(req.ToolChoice)
+	allowParallelToolCalls := req.ParallelToolCalls == nil || *req.ParallelToolCalls
+	maxToolCalls := 0
+	if !allowParallelToolCalls {
+		maxToolCalls = 1
+	}
+	toolCatalog := buildResponseToolCatalog(normalizedTools)
+	toolChoice := resolveToolChoice(normalizedToolChoice)
+	if err := validateToolChoiceConfiguration(toolChoice, toolCatalog); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_tool_choice", "%s", err.Error())
+		return
+	}
+	promptTools := toolsForPrompt(normalizedTools, toolChoice)
+	functionDefinitions := []interface{}{}
+	if len(promptTools) > 0 {
+		if err := json.Unmarshal(promptTools, &functionDefinitions); err != nil {
+			slog.Warn("failed to decode chat tools for upstream function definitions", "request_id", requestID, "error", err)
+			functionDefinitions = []interface{}{}
+		}
+	}
+	nativeTools := len(functionDefinitions) > 0
+	var chatPromptTools json.RawMessage
+	if !nativeTools {
+		chatPromptTools = promptTools
+	}
+	prompt := buildChatPrompt(req.Messages, chatPromptTools, normalizedToolChoice, maxToolCalls)
+	toolConstraints := toolProtocolConstraints{
+		RequiredTool: toolChoice.RequiredTool,
+		RequireTool:  toolChoice.RequireTool,
+		MaxCalls:     maxToolCalls,
+	}
+	bufferForToolCalls := len(toolCatalog) > 0 && !toolChoice.DisableTools
 
 	slog.Info("chat completion request",
 		"request_id", requestID,
@@ -297,6 +345,10 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		"stream", req.Stream,
 		"messages", len(req.Messages),
 		"thinking", showThinking,
+		"tools_present", bufferForToolCalls,
+		"required_tool", toolConstraints.RequiredTool,
+		"require_tool", toolConstraints.RequireTool,
+		"max_tool_calls", toolConstraints.MaxCalls,
 	)
 
 	// Build Fireworks request body
@@ -306,7 +358,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		},
 		ModelKey:            req.Model,
 		ConversationID:      fmt.Sprintf("session_%d_%d", time.Now().UnixMilli(), time.Now().UnixNano()%10000),
-		FunctionDefinitions: []interface{}{},
+		FunctionDefinitions: functionDefinitions,
 		Temperature:         req.Temperature,
 		MaxTokens:           req.MaxTokens,
 	}
@@ -321,7 +373,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.Stream {
 		p.handleStream(w, r, requestID, req.Model, bodyBytes, showThinking)
 	} else {
-		p.handleNonStream(w, r, requestID, req.Model, bodyBytes, showThinking)
+		p.handleNonStream(w, r, requestID, req.Model, bodyBytes, showThinking, toolCatalog, toolConstraints, bufferForToolCalls)
 	}
 }
 
@@ -402,20 +454,24 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 		return
 	}
 
-	isThinking := config.IsThinkingModel(model)
+	isThinking := models.IsThinkingModel(model)
 	doneReceived := false
+	nativeToolCallsReceived := false
 	contentEmitted, scanErr := scanSSEEvents(reader, isThinking, showThinking, func(evt sseContentEvent) bool {
 		switch evt.Type {
 		case "done":
 			doneReceived = true
-			stop := "stop"
+			reason := "stop"
+			if nativeToolCallsReceived {
+				reason = "tool_calls"
+			}
 			chunk := StreamChunk{
 				ID:      requestID,
 				Object:  "chat.completion.chunk",
 				Created: created,
 				Model:   model,
 				Choices: []StreamChoice{
-					{Index: 0, Delta: StreamDelta{}, FinishReason: &stop},
+					{Index: 0, Delta: StreamDelta{}, FinishReason: &reason},
 				},
 			}
 			if !writeAndFlushChunk(chunk) {
@@ -450,6 +506,42 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 				},
 			}
 			return writeAndFlushChunk(chunk)
+
+		case "tool_calls":
+			for i, tc := range evt.ToolCalls {
+				callID := tc.ID
+				if callID == "" {
+					callID = "call_" + strings.Replace(generateRequestID(), "chatcmpl-", "", 1)
+				}
+				chunk := StreamChunk{
+					ID:      requestID,
+					Object:  "chat.completion.chunk",
+					Created: created,
+					Model:   model,
+					Choices: []StreamChoice{{
+						Index: 0,
+						Delta: StreamDelta{ToolCalls: []ChatToolCall{{
+							ID:   callID,
+							Type: "function",
+							Function: ChatToolFunction{
+								Name:      tc.Name,
+								Arguments: string(tc.Arguments),
+							},
+						}}},
+						FinishReason: nil,
+					}},
+				}
+				_ = i
+				if !writeAndFlushChunk(chunk) {
+					return false
+				}
+			}
+			nativeToolCallsReceived = true
+
+		case "finish_reason":
+			if evt.FinishReason == "tool_calls" {
+				nativeToolCallsReceived = true
+			}
 		}
 		return true
 	})
@@ -457,14 +549,17 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 	// If no done event but content was emitted, send completion markers
 	if !doneReceived && contentEmitted {
 		slog.Debug("stream ended without done event but content available, sending completion markers", "request_id", requestID)
-		stop := "stop"
+		reason := "stop"
+		if nativeToolCallsReceived {
+			reason = "tool_calls"
+		}
 		chunk := StreamChunk{
 			ID:      requestID,
 			Object:  "chat.completion.chunk",
 			Created: created,
 			Model:   model,
 			Choices: []StreamChoice{
-				{Index: 0, Delta: StreamDelta{}, FinishReason: &stop},
+				{Index: 0, Delta: StreamDelta{}, FinishReason: &reason},
 			},
 		}
 		writeAndFlushChunk(chunk)
@@ -480,7 +575,7 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, requestID, 
 
 // handleNonStream collects the full response from Fireworks and returns it
 // in OpenAI non-streaming format.
-func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, requestID, model string, body []byte, showThinking bool) {
+func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, requestID, model string, body []byte, showThinking bool, toolCatalog map[string]responseToolDescriptor, toolConstraints toolProtocolConstraints, bufferForToolCalls bool) {
 	ctx := r.Context()
 
 	// For non-streaming requests, apply an overall timeout to prevent
@@ -505,14 +600,31 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, requestI
 	defer reader.Close()
 
 	var result strings.Builder
-	isThinking := config.IsThinkingModel(model)
+	isThinking := models.IsThinkingModel(model)
 	doneReceived := false
+	finishReason := "stop"
+	var nativeToolCalls []ChatToolCall
 
 	contentEmitted, scanErr := scanSSEEvents(reader, isThinking, showThinking, func(evt sseContentEvent) bool {
 		switch evt.Type {
 		case "done":
 			doneReceived = true
 			// handled by scanSSEEvents breaking the loop
+		case "finish_reason":
+			if evt.FinishReason != "" {
+				finishReason = evt.FinishReason
+			}
+		case "tool_calls":
+			for _, call := range evt.ToolCalls {
+				nativeToolCalls = append(nativeToolCalls, ChatToolCall{
+					ID:   call.ID,
+					Type: "function",
+					Function: ChatToolFunction{
+						Name:      call.Name,
+						Arguments: string(call.Arguments),
+					},
+				})
+			}
 		case "thinking_separator":
 			result.WriteString("\n\n--- Answer ---\n\n")
 		case "content":
@@ -556,6 +668,37 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, requestI
 		slog.Debug("stream ended without done event but content available, treating as success", "request_id", requestID, "result_len", result.Len())
 	}
 
+	message := ChatMessage{Role: "assistant", Content: result.String()}
+	if bufferForToolCalls {
+		if len(nativeToolCalls) > 0 || finishReason == "tool_calls" {
+			message.ToolCalls = nativeToolCalls
+			if finishReason == "" {
+				finishReason = "tool_calls"
+			}
+		} else {
+			toolCalls, visibleText, err := parseChatToolCallOutput(result.String(), toolCatalog, toolConstraints)
+			slog.Info("tool protocol outcome",
+				"api", "chat_completions",
+				"request_id", requestID,
+				"tool_calls", len(toolCalls),
+				"required_tool", toolConstraints.RequiredTool,
+				"require_tool", toolConstraints.RequireTool,
+				"max_tool_calls", toolConstraints.MaxCalls,
+				"error", toolProtocolErrorString(err),
+			)
+			if err != nil {
+				message.Content = buildToolProtocolErrorMessage(err, result.String())
+				finishReason = "stop"
+			} else {
+				message.Content = visibleText
+				if len(toolCalls) > 0 {
+					message.ToolCalls = toolCalls
+					finishReason = "tool_calls"
+				}
+			}
+		}
+	}
+
 	resp := ChatCompletionResponse{
 		ID:      requestID,
 		Object:  "chat.completion",
@@ -564,8 +707,8 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, r *http.Request, requestI
 		Choices: []ChatCompletionChoice{
 			{
 				Index:        0,
-				Message:      ChatMessage{Role: "assistant", Content: result.String()},
-				FinishReason: "stop",
+				Message:      message,
+				FinishReason: finishReason,
 			},
 		},
 		// Fireworks does not return token usage; return zeros to avoid misleading clients.

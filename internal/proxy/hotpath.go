@@ -35,8 +35,10 @@ var (
 
 // sseContentEvent represents a parsed, filtered SSE content event ready for processing.
 type sseContentEvent struct {
-	Type    string // "content", "done", "thinking_separator"
-	Content string // only set for "content" events
+	Type         string        // "content", "done", "thinking_separator", "tool_calls", "finish_reason"
+	Content      string        // for "content" events
+	ToolCalls    []SSEToolCall // for "tool_calls" events
+	FinishReason string        // for "finish_reason" events
 }
 
 type thinkingScanState struct {
@@ -207,6 +209,21 @@ func scanSSEEvents(reader io.Reader, isThinking, showThinking bool, onEvent func
 				message = "unknown upstream error"
 			}
 			return hasContent, fmt.Errorf("upstream error: %s", message)
+		}
+
+		if evt.Type == "tool_calls" && len(evt.ToolCalls) > 0 {
+			if !onEvent(sseContentEvent{Type: "tool_calls", ToolCalls: evt.ToolCalls}) {
+				return hasContent, nil
+			}
+			hasContent = true
+			continue
+		}
+
+		if evt.Type == "finish_reason" {
+			if !onEvent(sseContentEvent{Type: "finish_reason", FinishReason: evt.FinishReason}) {
+				return hasContent, nil
+			}
+			continue
 		}
 
 		if evt.Type == "done" {
