@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	aiActionsStartMarker = "<<<AI_ACTIONS_V1>>>"
-	aiActionsEndMarker   = "<<<END_AI_ACTIONS_V1>>>"
+	aiActionsStartMarker       = "<<<AI_ACTIONS_V1>>>"
+	aiActionsCompatStartMarker = "<<<AI_ACTIONS_V1>>"
+	aiActionsEndMarker         = "<<<END_AI_ACTIONS_V1>>>"
 )
 
 type toolProtocolMode string
@@ -87,8 +88,8 @@ func appendToolProtocolInstructions(builder *strings.Builder, supportsCustom boo
 }
 
 func extractAIActionsBlock(text string) (aiActionsBlock, bool) {
-	start := strings.LastIndex(text, aiActionsStartMarker)
-	if start < 0 {
+	start, startMarker := findAIActionsStartMarker(text)
+	if start < 0 || startMarker == "" {
 		return aiActionsBlock{}, false
 	}
 
@@ -102,7 +103,7 @@ func extractAIActionsBlock(text string) (aiActionsBlock, bool) {
 		return aiActionsBlock{}, false
 	}
 
-	payloadStart := start + len(aiActionsStartMarker)
+	payloadStart := start + len(startMarker)
 	payload := strings.TrimSpace(text[payloadStart:end])
 	if payload == "" {
 		return aiActionsBlock{}, false
@@ -112,6 +113,18 @@ func extractAIActionsBlock(text string) (aiActionsBlock, bool) {
 		VisibleText: strings.TrimSpace(text[:start]),
 		JSONText:    payload,
 	}, true
+}
+
+func findAIActionsStartMarker(text string) (int, string) {
+	start := -1
+	marker := ""
+	for _, candidate := range []string{aiActionsStartMarker, aiActionsCompatStartMarker} {
+		if idx := strings.LastIndex(text, candidate); idx >= 0 && idx > start {
+			start = idx
+			marker = candidate
+		}
+	}
+	return start, marker
 }
 
 func parseToolCallOutputs(text string, allowedTools map[string]responseToolDescriptor, requiredTool string) parsedToolCallBatchResult {
@@ -133,9 +146,9 @@ func parseAIActionsToolCallOutputs(block aiActionsBlock, allowedTools map[string
 		visibleText:    block.VisibleText,
 	}
 
-	var envelope aiActionsEnvelope
 	jsonText := strings.TrimSpace(stripMarkdownCodeFence(block.JSONText))
-	if err := json.Unmarshal([]byte(jsonText), &envelope); err != nil {
+	envelope, err := decodeAIActionsEnvelope(jsonText)
+	if err != nil {
 		result.err = fmt.Errorf("AI actions JSON decode failed: %w", err)
 		return result
 	}
@@ -168,6 +181,24 @@ func parseAIActionsToolCallOutputs(block aiActionsBlock, allowedTools map[string
 		result.err = fmt.Errorf("unsupported AI actions mode %q", envelope.Mode)
 		return result
 	}
+}
+
+func decodeAIActionsEnvelope(jsonText string) (aiActionsEnvelope, error) {
+	var envelope aiActionsEnvelope
+	decodeErr := json.Unmarshal([]byte(jsonText), &envelope)
+	if decodeErr == nil {
+		return envelope, nil
+	}
+
+	// Some upstream models append non-JSON narration inside the marker block.
+	extracted, ok := extractJSONObject(jsonText)
+	if !ok || extracted == jsonText {
+		return aiActionsEnvelope{}, decodeErr
+	}
+	if err := json.Unmarshal([]byte(extracted), &envelope); err != nil {
+		return aiActionsEnvelope{}, err
+	}
+	return envelope, nil
 }
 
 func applyToolProtocolConstraints(result parsedToolCallBatchResult, constraints toolProtocolConstraints) parsedToolCallBatchResult {
@@ -274,11 +305,63 @@ func decodeLegacyToolCallSequence(candidate string) ([]map[string]any, error) {
 			if errors.Is(err, io.EOF) {
 				break
 			}
+			if len(raws) > 0 {
+				offset := int(decoder.InputOffset())
+				if offset >= 0 && offset <= len(candidate) {
+					if isIgnorableLegacyTail(candidate[offset:]) {
+						break
+					}
+				}
+			}
 			return nil, err
 		}
 		raws = append(raws, raw)
 	}
 	return raws, nil
+}
+
+func isIgnorableLegacyTail(tail string) bool {
+	remaining := strings.TrimSpace(tail)
+	if remaining == "" {
+		return true
+	}
+
+	tokens := []string{
+		"```",
+		"</function_call>",
+		"</tool_call>",
+		"</function>",
+		"</tool>",
+		"</think>",
+	}
+
+	for remaining != "" {
+		remaining = strings.TrimSpace(remaining)
+		if remaining == "" {
+			return true
+		}
+
+		matched := false
+		for _, token := range tokens {
+			if strings.HasPrefix(remaining, token) {
+				remaining = remaining[len(token):]
+				matched = true
+				break
+			}
+			lowerRemaining := strings.ToLower(remaining)
+			lowerToken := strings.ToLower(token)
+			if strings.HasPrefix(lowerRemaining, lowerToken) {
+				remaining = remaining[len(token):]
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	return true
 }
 
 func resolveToolNameForCatalog(rawName, normalized string, allowedTools map[string]responseToolDescriptor) (string, bool) {

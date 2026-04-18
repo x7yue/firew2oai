@@ -757,7 +757,7 @@ func extractJSONObject(text string) (string, bool) {
 func normalizeToolName(name string) string {
 	trimmed := strings.TrimSpace(name)
 	switch strings.ToLower(trimmed) {
-	case "run_terminal", "run_terminal_cmd", "run_command", "shell", "shell_command", "bash", "terminal", "read_file", "readfile", "cat", "list_files", "listfiles":
+	case "run_terminal", "run_terminal_cmd", "run_command", "shell", "shell_command", "bash", "terminal", "read_file", "readfile", "cat", "list_files", "listfiles", "execute_command":
 		return "exec_command"
 	default:
 		return trimmed

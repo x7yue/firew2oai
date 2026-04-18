@@ -203,6 +203,20 @@ func TestParseToolCallOutputs_AIActionsBlockWithFencedJSON(t *testing.T) {
 	}
 }
 
+func TestParseToolCallOutputs_AIActionsBlockWithCompatStartMarker(t *testing.T) {
+	text := "先读取 README。\n<<<AI_ACTIONS_V1>>\n{\"mode\":\"tool\",\"calls\":[{\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"sed -n '1,5p' README.md\"}}]}\n<<<END_AI_ACTIONS_V1>>>"
+	result := parseToolCallOutputs(text, map[string]responseToolDescriptor{
+		"exec_command": {Name: "exec_command", Type: "function", Structured: true},
+	}, "")
+
+	if result.err != nil {
+		t.Fatalf("unexpected parse error: %v", result.err)
+	}
+	if len(result.calls) != 1 {
+		t.Fatalf("tool call count = %d, want 1", len(result.calls))
+	}
+}
+
 func TestParseToolCallOutputs_FallsBackToLegacyJSON(t *testing.T) {
 	result := parseToolCallOutputs(
 		"I will inspect first.\n{\"type\":\"function_call\",\"name\":\"run_terminal\",\"arguments\":{\"cmd\":\"pwd\"}}",
@@ -224,7 +238,7 @@ func TestParseToolCallOutputs_FallsBackToLegacyJSON(t *testing.T) {
 }
 
 func TestParseToolCallOutputs_NormalizesTerminalCommandAliases(t *testing.T) {
-	for _, alias := range []string{"run_terminal_cmd", "run_command", "shell_command"} {
+	for _, alias := range []string{"run_terminal_cmd", "run_command", "shell_command", "execute_command"} {
 		t.Run(alias, func(t *testing.T) {
 			result := parseToolCallOutputs(
 				fmt.Sprintf(`{"type":"function_call","name":%q,"arguments":{"cmd":"ls -la"}}`, alias),
@@ -244,6 +258,26 @@ func TestParseToolCallOutputs_NormalizesTerminalCommandAliases(t *testing.T) {
 				t.Fatalf("item did not normalize alias: %s", string(result.calls[0].item))
 			}
 		})
+	}
+}
+
+func TestParseToolCallOutputs_AIActionsBlock_RecoversFromTrailingNarration(t *testing.T) {
+	text := "先执行。\n<<<AI_ACTIONS_V1>>>\n```json\n{\"mode\":\"tool\",\"calls\":[{\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"pwd\"}}]}\n```\n补充说明\n<<<END_AI_ACTIONS_V1>>>"
+	result := parseToolCallOutputs(text, map[string]responseToolDescriptor{
+		"exec_command": {Name: "exec_command", Type: "function", Structured: true},
+	}, "")
+
+	if result.err != nil {
+		t.Fatalf("unexpected parse error: %v", result.err)
+	}
+	if len(result.calls) != 1 {
+		t.Fatalf("tool call count = %d, want 1", len(result.calls))
+	}
+	if result.visibleText != "先执行。" {
+		t.Fatalf("visible text = %q", result.visibleText)
+	}
+	if !strings.Contains(string(result.calls[0].item), `"name":"exec_command"`) {
+		t.Fatalf("item tool name mismatch: %s", string(result.calls[0].item))
 	}
 }
 
@@ -342,6 +376,23 @@ func TestParseToolCallOutputs_LegacyJSONSequence(t *testing.T) {
 	}
 }
 
+func TestParseToolCallOutputs_LegacyJSONSequence_AllowsFunctionCallClosingTagTail(t *testing.T) {
+	result := parseToolCallOutputs(
+		"{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"sed -n '1,5p' README.md\"}}\n{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"sed -n '170,260p' internal/proxy/tool_protocol.go\"}}\n</function_call>",
+		map[string]responseToolDescriptor{
+			"exec_command": {Name: "exec_command", Type: "function", Structured: true},
+		},
+		"",
+	)
+
+	if result.err != nil {
+		t.Fatalf("unexpected parse error: %v", result.err)
+	}
+	if len(result.calls) != 2 {
+		t.Fatalf("tool call count = %d, want 2", len(result.calls))
+	}
+}
+
 func TestParseToolCallOutputs_LegacyJSONSequenceWithPrefixText(t *testing.T) {
 	result := parseToolCallOutputs(
 		"我先读取两个位置。\n{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"sed -n '1,5p' README.md\"}}\n{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"sed -n '170,260p' internal/proxy/tool_protocol.go\"}}",
@@ -378,6 +429,27 @@ func TestParseToolCallOutputs_LegacyJSONSequenceRejectsMarkdownBetweenCalls(t *t
 
 func TestParseToolCallOutputs_LegacyJSONWithoutTypeStaysPlainText(t *testing.T) {
 	text := `{"name":"exec_command","arguments":{"cmd":"pwd"}}`
+	result := parseToolCallOutputs(
+		text,
+		map[string]responseToolDescriptor{
+			"exec_command": {Name: "exec_command", Type: "function", Structured: true},
+		},
+		"",
+	)
+
+	if result.err != nil {
+		t.Fatalf("unexpected parse error: %v", result.err)
+	}
+	if len(result.calls) != 0 {
+		t.Fatalf("tool call count = %d, want 0", len(result.calls))
+	}
+	if result.visibleText != text {
+		t.Fatalf("visible text = %q, want %q", result.visibleText, text)
+	}
+}
+
+func TestParseToolCallOutputs_LegacyJSONWithoutTypeWithFenceTailStaysPlainText(t *testing.T) {
+	text := "{\"cmd\":\"pwd\"}\n```"
 	result := parseToolCallOutputs(
 		text,
 		map[string]responseToolDescriptor{
@@ -587,6 +659,19 @@ func TestExtractAIActionsBlock_RejectsTrailingContentAfterMarker(t *testing.T) {
 	_, found := extractAIActionsBlock("ok\n<<<AI_ACTIONS_V1>>>\n{\"mode\":\"final\"}\n<<<END_AI_ACTIONS_V1>>>\nextra")
 	if found {
 		t.Fatal("expected trailing content after end marker to disable block parsing")
+	}
+}
+
+func TestExtractAIActionsBlock_AcceptsCompatStartMarker(t *testing.T) {
+	block, found := extractAIActionsBlock("ok\n<<<AI_ACTIONS_V1>>\n{\"mode\":\"final\"}\n<<<END_AI_ACTIONS_V1>>>")
+	if !found {
+		t.Fatal("expected compat start marker to be accepted")
+	}
+	if block.VisibleText != "ok" {
+		t.Fatalf("visible text = %q, want %q", block.VisibleText, "ok")
+	}
+	if block.JSONText != "{\"mode\":\"final\"}" {
+		t.Fatalf("json text = %q", block.JSONText)
 	}
 }
 
