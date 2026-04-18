@@ -8,6 +8,8 @@ go test ./internal/proxy
 go test ./...
 make test
 go test ./internal/proxy -run 'TestHandleResponses_StreamAIActionsBlock_(RequiredToolRejectsFinalMode|ParallelToolCallsFalseRejectsMultipleCalls)'
+docker compose build firew2oai
+docker compose up -d firew2oai
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:39530/v1/models
 POST /v1/chat/completions (qwen3-8b, stream=false/true)
 POST /v1/responses
@@ -15,6 +17,8 @@ POST /v1/responses with previous_response_id
 GET /v1/responses/{id}
 GET /v1/responses/{id}/input_items
 POST https://chat.fireworks.ai/chat/single for minimax-m2p1, kimi-k2-thinking, kimi-k2-instruct-0905, cogito-671b-v2-p1
+codex six-model retest via new-api (result: /tmp/codex-six-models-20260418-newapi-iter2/summary.tsv)
+select id,channel_id,model_name,to_timestamp(created_at) from logs where id > <start_id> ...
 ```
 
 ## Results
@@ -57,6 +61,10 @@ POST https://chat.fireworks.ai/chat/single for minimax-m2p1, kimi-k2-thinking, k
 - 与 baseline 相比，`adapter_error_before_tool` 与 `partial_tool_then_adapter_error` 均降为 0，6/6 模型都出现了真实 `command_execution`。
 - 当前稳定口径下仍未出现可复现的复杂任务闭环完成样本，结论仍为“协议适配可用，复杂多轮 Agent 任务不可用”。
 - 一次中间实验（iter6）出现长循环工具调用（`kimi-k2p5`、`glm-5`），相关策略已回退，未进入稳定版本。
+- `docker compose build firew2oai && docker compose up -d firew2oai` 已执行，`firew2oai` 容器为 `healthy`。
+- 部署后补跑 `Codex -> new-api -> firew2oai` 六模型复测：6/6 仍未闭环，详见 `/tmp/codex-six-models-20260418-newapi-iter2/summary.tsv`。
+- 同批请求在 new-api `logs` 中均命中 `channel_id=106`，排除“走错渠道”。
+- 抽样直连 `http://127.0.0.1:39527/v1` 的 `deepseek-v3p2` 复测可达 `cmd_count=3`，说明 firew2oai 新容器生效；中转链路与直连仍存在行为差异。
 
 ## Limits
 
